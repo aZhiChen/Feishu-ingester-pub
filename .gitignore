@@ -1,0 +1,10 @@
+# Sensitive local configuration
+config.yaml
+
+# Runtime logs
+logs/
+*.log
+
+# Python cache files
+__pycache__/
+*.py[cod]

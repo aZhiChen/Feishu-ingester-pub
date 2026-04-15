@@ -1,0 +1,48 @@
+# FeishuBot - 飞书群聊接入端配置示例
+# 复制此文件为 config.yaml 并填写实际配置
+
+# 后端大脑 API 地址
+backend:
+  base_url: "http://localhost:3000"  # 模块二后端服务地址
+
+# 飞书应用配置
+# 重要：需在飞书开放平台开启 im:message.group_msg:readonly 权限，才能接收群内所有消息（非仅@机器人）
+feishu:
+  app_id: "cli_xxxxxxxxxxxx"           # 应用 App ID（开发者后台 > 凭证与基础信息）
+  app_secret: "xxxxxxxxxxxxxxxx"       # 应用 App Secret
+  encrypt_key: ""                      # 加密密钥（可选，事件与回调 > 加密策略，不配置则事件明文推送）
+  verification_token: ""                # 校验 Token（可选，事件与回调 > 加密策略）
+
+# 群聊 chat_id 映射（用于发送消息时识别，可与后端约定）
+# 若后端返回的 target_id 为 chat_id，则直接使用；也可配置别名映射
+group_chat_ids: []
+# 示例: ["oc_xxxxxxxxxxxx", "oc_yyyyyyyyyyyy"]
+
+# 飞书知识库同步
+wiki:
+  enabled: false                    # 是否启用 wiki 轮询
+  space_ids: []                     # 知识库 space_id 列表，示例: ["7602934696456096713"]
+  page_size: 50                     # 分页大小
+
+# 飞书云文档目录同步（drive 文件夹轮询）
+drive:
+  enabled: false                    # 是否启用 drive 目录轮询
+  folder_tokens:
+    - token: "ZNObflUabl5LNedhAXOcbvZ3nUg"
+      name: "城大工程组"
+  page_size: 100                    # 每页文件数
+  upload_batch_size: 10             # 每批最多推送几篇文档到后端（减小单次请求体积与超时风险）
+  upload_max_retries: 5             # 每批推送失败或部分失败时，立即重试次数（不含首次）
+  upload_retry_delay_sec: 1         # 每次重试前等待秒数（避免打满后端）
+
+# 定时任务配置（单位：毫秒）
+schedule:
+  batch_upload_interval: 300000      # 批量上报间隔，默认 5 分钟
+  get_tasks_interval: 60000          # 轮询任务间隔，默认 1 分钟
+  wiki_sync_interval: 300000         # wiki 同步间隔，默认 5 分钟
+  drive_sync_interval: 86400000      # drive 目录同步间隔，默认 24 小时
+
+# HTTP 服务配置（接收飞书事件回调）
+server:
+  port: 8788
+  path: "/feishu/callback"
