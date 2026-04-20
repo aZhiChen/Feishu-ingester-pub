@@ -18,6 +18,7 @@ logger = get_logger("feishu.callback")
 
 
 _user_name_cache = {}
+_chat_name_cache = {}
 
 
 def _get_feishu_config():
@@ -75,25 +76,42 @@ def _json_response(data: dict, status: int = 200):
 
 
 def _resolve_sender_identity(sender: dict) -> tuple[str, str]:
-    """Extract sender id and its id_type from callback payload."""
+    """Extract sender id and its id_type from callback payload.
+
+    Prefer open_id so that downstream `_fetch_user_name` calls
+    `GET /contact/v3/users/{open_id}?user_id_type=open_id` to resolve the name.
+    """
     sender_id_obj = sender.get("sender_id", {}) or {}
-    if sender_id_obj.get("user_id"):
-        return sender_id_obj["user_id"], "user_id"
     if sender_id_obj.get("open_id"):
         return sender_id_obj["open_id"], "open_id"
     if sender_id_obj.get("union_id"):
         return sender_id_obj["union_id"], "union_id"
-    return "unknown", "user_id"
+    if sender_id_obj.get("user_id"):
+        return sender_id_obj["user_id"], "user_id"
+    return "unknown", "open_id"
 
 
 def _fetch_user_name(user_id: str, id_type: str) -> str:
-    """Fetch user display name from Feishu contact API with cache."""
+    """Fetch user display name via GET /contact/v3/users/{user_id} with cache."""
     if not user_id or user_id == "unknown":
+        logger.warning(
+            "[Callback] _fetch_user_name: 空 user_id 或 unknown，跳过查询 (id_type=%s)",
+            id_type,
+        )
         return ""
     cache_key = f"{id_type}:{user_id}"
     if cache_key in _user_name_cache:
-        return _user_name_cache[cache_key]
+        cached = _user_name_cache[cache_key]
+        logger.info(
+            "[Callback] sender_name 命中缓存: user_id=%s id_type=%s name=%s",
+            user_id, id_type, cached,
+        )
+        return cached
 
+    logger.info(
+        "[Callback] 调用 GET /contact/v3/users/%s?user_id_type=%s 拉取用户姓名",
+        user_id, id_type,
+    )
     try:
         token = get_tenant_access_token()
         r = requests.get(
@@ -105,22 +123,84 @@ def _fetch_user_name(user_id: str, id_type: str) -> str:
         data = r.json()
         if data.get("code") == 0:
             user = (data.get("data") or {}).get("user", {}) or {}
-            name = (
-                str(user.get("name") or user.get("en_name") or user_id).strip()
+            name = str(user.get("name") or user.get("en_name") or "").strip()
+            if name:
+                _user_name_cache[cache_key] = name
+                logger.info(
+                    "[Callback] sender_name 拉取成功: user_id=%s id_type=%s name=%s "
+                    "(已加入缓存，size=%d)",
+                    user_id, id_type, name, len(_user_name_cache),
+                )
+                return name
+            logger.warning(
+                "[Callback] sender_name 拉取成功但 name 字段为空: user_id=%s id_type=%s user=%s",
+                user_id, id_type, user,
             )
-            _user_name_cache[cache_key] = name
-            return name
-        logger.warning(
-            "[Callback] 获取用户名称失败 user_id=%s id_type=%s code=%s msg=%s",
-            user_id, id_type, data.get("code"), data.get("msg"),
-        )
+        else:
+            logger.warning(
+                "[Callback] sender_name 拉取失败: user_id=%s id_type=%s code=%s msg=%s",
+                user_id, id_type, data.get("code"), data.get("msg"),
+            )
     except Exception as e:
-        logger.warning("[Callback] 查询用户姓名异常 user_id=%s err=%s", user_id, e)
+        logger.warning(
+            "[Callback] sender_name 查询异常: user_id=%s id_type=%s err=%s",
+            user_id, id_type, e,
+        )
+    return ""
+
+
+def _fetch_chat_name(chat_id: str) -> str:
+    """Fetch group chat name via GET /im/v1/chats/{chat_id} with cache."""
+    if not chat_id:
+        logger.warning("[Callback] _fetch_chat_name: 空 chat_id，跳过查询")
+        return ""
+    if chat_id in _chat_name_cache:
+        cached = _chat_name_cache[chat_id]
+        logger.info("[Callback] group_name 命中缓存: chat_id=%s name=%s", chat_id, cached)
+        return cached
+
+    logger.info("[Callback] 调用 GET /im/v1/chats/%s 拉取群名称", chat_id)
+    try:
+        token = get_tenant_access_token()
+        r = requests.get(
+            f"{API_BASE}/im/v1/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        data = r.json()
+        if data.get("code") == 0:
+            name = str((data.get("data") or {}).get("name") or "").strip()
+            if name:
+                _chat_name_cache[chat_id] = name
+                logger.info(
+                    "[Callback] group_name 拉取成功: chat_id=%s name=%s (已加入缓存，size=%d)",
+                    chat_id, name, len(_chat_name_cache),
+                )
+                return name
+            logger.warning(
+                "[Callback] group_name 拉取成功但 name 字段为空: chat_id=%s data=%s",
+                chat_id, data.get("data"),
+            )
+        else:
+            logger.warning(
+                "[Callback] group_name 拉取失败: chat_id=%s code=%s msg=%s",
+                chat_id, data.get("code"), data.get("msg"),
+            )
+    except Exception as e:
+        logger.warning("[Callback] group_name 查询异常: chat_id=%s err=%s", chat_id, e)
     return ""
 
 
 def _resolve_sender_name(sender: dict, sender_id: str, sender_id_type: str, mentions: list) -> str:
-    """Resolve sender name from event payload first, then contact API."""
+    """Resolve sender name. Contact API is the primary source (cached); payload/mentions are fallbacks."""
+    fetched = _fetch_user_name(sender_id, sender_id_type)
+    if fetched:
+        logger.info(
+            "[Callback] sender_name resolved via contact_api: sender_id=%s id_type=%s name=%s",
+            sender_id, sender_id_type, fetched,
+        )
+        return fetched
+
     direct_name = (
         sender.get("name")
         or sender.get("sender_name")
@@ -130,7 +210,7 @@ def _resolve_sender_name(sender: dict, sender_id: str, sender_id_type: str, ment
     if direct_name:
         name = str(direct_name).strip()
         logger.info(
-            "[Callback] sender_name resolved via payload: sender_id=%s name=%s",
+            "[Callback] sender_name fallback via payload: sender_id=%s name=%s",
             sender_id, name,
         )
         return name
@@ -140,7 +220,7 @@ def _resolve_sender_name(sender: dict, sender_id: str, sender_id_type: str, ment
         if sender_id_obj.get(key):
             name = str(sender_id_obj.get(key)).strip()
             logger.info(
-                "[Callback] sender_name resolved via sender_id.%s: sender_id=%s name=%s",
+                "[Callback] sender_name fallback via sender_id.%s: sender_id=%s name=%s",
                 key, sender_id, name,
             )
             return name
@@ -155,21 +235,13 @@ def _resolve_sender_name(sender: dict, sender_id: str, sender_id_type: str, ment
         ):
             name = str(m.get("name") or sender_id).strip()
             logger.info(
-                "[Callback] sender_name resolved via mentions: sender_id=%s name=%s",
+                "[Callback] sender_name fallback via mentions: sender_id=%s name=%s",
                 sender_id, name,
             )
             return name
 
-    fetched = _fetch_user_name(sender_id, sender_id_type)
-    if fetched:
-        logger.info(
-            "[Callback] sender_name resolved via contact_api: sender_id=%s id_type=%s name=%s",
-            sender_id, sender_id_type, fetched,
-        )
-        return fetched
-
     logger.warning(
-        "[Callback] sender_name fallback to sender_id: sender_id=%s id_type=%s",
+        "[Callback] sender_name 全部来源失败，回退到 sender_id: sender_id=%s id_type=%s",
         sender_id, sender_id_type,
     )
     return sender_id
@@ -233,8 +305,27 @@ def handle_callback():
     if sender.get("sender_type") == "app":
         return _json_response({"ok": True})
 
-    group_id = chat_id if chat_type in ("group", "topic_group") else sender_id
-    group_name = f"群聊-{chat_id}" if chat_type in ("group", "topic_group") else f"单聊-{sender_id}"
+    is_group_chat = chat_type in ("group", "topic_group")
+    group_id = chat_id if is_group_chat else sender_id
+    if is_group_chat:
+        fetched_name = _fetch_chat_name(chat_id)
+        if fetched_name:
+            group_name = fetched_name
+            logger.info(
+                "[Callback] group_name resolved: chat_id=%s chat_type=%s name=%s",
+                chat_id, chat_type, group_name,
+            )
+        else:
+            group_name = f"群聊-{chat_id}"
+            logger.warning(
+                "[Callback] group_name fallback to chat_id: chat_id=%s chat_type=%s name=%s",
+                chat_id, chat_type, group_name,
+            )
+    else:
+        group_name = f"单聊-{sender_id}"
+        logger.info(
+            "[Callback] p2p chat, group_name=%s sender_id=%s", group_name, sender_id,
+        )
 
     content = ""
     try:
@@ -277,7 +368,7 @@ def handle_callback():
         if bot_mentioned and clean_question.strip():
             threading.Thread(
                 target=_handle_bot_mention,
-                args=(group_id, clean_question, sender_id, sender_name,
+                args=(group_id, group_name, clean_question, sender_id, sender_name,
                       message.get("message_id", message_id)),
                 daemon=True,
             ).start()
@@ -348,7 +439,7 @@ def _check_bot_mention(content: str, mentions: list) -> tuple:
     return bot_mentioned, content
 
 
-def _handle_bot_mention(group_id: str, question: str, sender_id: str,
+def _handle_bot_mention(group_id: str, group_name: str, question: str, sender_id: str,
                         sender_name: str, message_id: str):
     """后台线程：调用后端 ask_bot 接口，然后向群发送回复。"""
     from feishubot.backend.client import ask_bot
@@ -360,10 +451,13 @@ def _handle_bot_mention(group_id: str, question: str, sender_id: str,
         if kind != "general":
             logger.info("[BotMention] 问题类型=%s，预拉取结构化数据", kind)
         extra = build_extra_context(group_id, question)
-        logger.info("[BotMention] 处理 @bot 提问: %s...", question[:60])
+        logger.info(
+            "[BotMention] 处理 @bot 提问: group_name=%s sender_name=%s q=%s...",
+            group_name, sender_name, question[:60],
+        )
         result = ask_bot(
             group_id, question, sender_id, sender_name, message_id,
-            extra_context=extra,
+            extra_context=extra, group_name=group_name,
         )
         reply = result.get("reply", "") or "抱歉，暂时无法回答这个问题。"
         send_to_group(group_id, reply)

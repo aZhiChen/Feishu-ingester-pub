@@ -73,11 +73,12 @@ def upload_drive_docs(docs: list, folder_token: str = "") -> dict:
 
 def ask_bot(group_id: str, question: str, sender_id: str = "",
             sender_name: str = "", message_id: str = "",
-            extra_context: str = "") -> dict:
+            extra_context: str = "", group_name: str = "") -> dict:
     """POST /api/chat/ask_bot - 获取 LLM 对 @bot 提及的回复"""
     url = f"{get_backend_base_url()}/api/chat/ask_bot"
     body = {
         "group_id": group_id,
+        "group_name": group_name,
         "question": question,
         "sender_id": sender_id,
         "sender_name": sender_name,
@@ -85,6 +86,9 @@ def ask_bot(group_id: str, question: str, sender_id: str = "",
     }
     if extra_context and extra_context.strip():
         body["extra_context"] = extra_context.strip()
-    logger.info("[Backend] ask_bot: group_id=%s question_len=%s", group_id, len(question or ""))
+    logger.info(
+        "[Backend] ask_bot: group_id=%s group_name=%s sender_name=%s question_len=%s",
+        group_id, group_name, sender_name, len(question or ""),
+    )
     r = requests.post(url, json=body, timeout=120)
     return r.json()
