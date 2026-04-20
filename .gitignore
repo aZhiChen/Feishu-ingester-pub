@@ -1,10 +1,22 @@
 # Sensitive local configuration
 config.yaml
-
+config.yaml.local
 # Runtime logs
 logs/
 *.log
-
-# Python cache files
+# Python cache
 __pycache__/
 *.py[cod]
+*$py.class
+# Database
+*.db
+feishu_assistant.db
+# Virtual environments
+venv/
+env/
+.venv/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
